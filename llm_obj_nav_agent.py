@@ -583,18 +583,18 @@ RULES:
 3、If the target is within 3 meters but not visiable, rotate to let the object is in front of you.
 """
     action_tool_prompt = {
-        OpType.DEFAULT_MOVE : f"""Use Action Tool as the following format:
+        OpType.DEFAULT_MOVE: f"""Use Action Tool as the following format:
 - Action: [name] [parameter]
 
 TIPS: You can only take actions from the following Actions List. You are very strict to the Actionn Name, never use nonexistent Action Names. 
-Some Actions has parameters, using "[]" stands for parameter, you don't need to enter it when passing the parameter. All parameters are positive numbers with {GRID_SIZE} as the smallest unit. You should decide wheather use the paramters or not.
+Some Actions has parameters, using "[]" stands for parameter, you don't need to enter it when passing the parameter. All parameters are positive numbers with {GRID_SIZE} as the smallest unit. 
 
-Actions List, described in this format: <Name [Parameter](optional):
-- MoveAhead [length]
-- RotateRight [degrees]
+Actions List:
+- MoveAhead [length] : This action means move towards your Front direction by [length] meters, default with {GRID_SIZE} meters
+- RotateRight [degrees] : This action means rotate to your right by a certain angle. e.g. rotate to Front Right, degrees=45, rotate to Right, degrees=90, rotate to Rear Left, degrees=215
 - Done
 """,
-        OpType.EIGHT_DIR_MOVE : f"""Take action to move around the room. Use Action Tool as this format:
+        OpType.EIGHT_DIR_MOVE: f"""Take action to move around the room. Use Action Tool as this format:
 - Action: Move [direction] [length]
 - Action: RotateTo [direction]
 - Action: Done
@@ -619,7 +619,7 @@ You are very strict to next rules:
 	[Front, Front Right, Right, Rear Right, Rear, Rear Left, Left, Front Left]
 """
     }
-    
+
     nav_tips_prompt = f"""
 At each step, you should consider: 
 (1) According to the RULES, have you found the target object? If yes, you should output "Action: Done" to stop. Or you should continue.
@@ -642,8 +642,6 @@ Action [N]: Done
 
     return principal_prompt + action_tool_prompt[action_type] + nav_tips_prompt + format_prompt
 
-       
-
 
 def get_observation_prompt():
     observation_tips_prompt = f"""
@@ -651,7 +649,6 @@ def get_observation_prompt():
     And the Maximum distance of accessibility sectionis the max distance you can travel in that direction without hitting an obstacle.
 """
     return observation_tips_prompt
-
 
 
 def get_first_prompt(target_object_type, init_observation):
@@ -679,7 +676,7 @@ Initial Observation [1]: {init_observation}
 #         return None
 
 def extract_action_command(action_type, action_str):
-
+    print(f"[EXTRACT ACTION] action str = {action_str}")
     res_dict = {}
     if action_type == OpType.DEFAULT_MOVE:
         pattern = r"\s*(\w+)\s*([-+]?[0-9]*\.?[0-9]+)"
@@ -699,7 +696,7 @@ def extract_action_command(action_type, action_str):
             return None
 
     if action_type == OpType.EIGHT_DIR_MOVE:
-        action_pattern = r"\s*(Move)\s*(.*?)\s*([-+]?[0-9]*\.?[0-9]+)|^(Done)$"
+        action_pattern = r"\s*(Move)\s*(.*?)\s*([-+]?[0-9]*\.?[0-9]+)|\s*(RotateTo)\s*(.*)|^(Done)$"
         action_match = re.match(action_pattern, action_str)
         if action_match:
             if action_match.group(1):  # 匹配到Move
@@ -713,10 +710,22 @@ def extract_action_command(action_type, action_str):
                     'action_type': OpType.EIGHT_DIR_MOVE
                 }
                 return res_dict
-            elif action_match.group(4):  # 匹配到Done
+            elif action_match.group(4):  # 匹配到RotateTo
                 action_name = action_match.group(4)
+                param1 = action_match.group(5)
                 res_dict = {
                     'name': action_name,
+                    'direction': param1,
+                    'value': 0.0,
+                    'action_type': OpType.EIGHT_DIR_MOVE
+                }
+                return res_dict
+            elif action_match.group(6):  # 匹配到Done
+                action_name = action_match.group(6)
+                res_dict = {
+                    'name': action_name,
+                    'direction': "",
+                    'value': 0.0,
                     'action_type': OpType.EIGHT_DIR_MOVE
                 }
                 return res_dict
@@ -725,16 +734,23 @@ def extract_action_command(action_type, action_str):
             return None
 
     if action_type == OpType.FOLLOW_OBJ:
-        action_pattern = r"\s*(MoveTo|RotateTo)\s*(.*?)\s*"
+        action_pattern = r"\s*(MoveTo|RotateTo)\s*(.*)\s*|^(Done)$"
         action_match = re.match(action_pattern, action_str)
         if action_match:
-            action_name = action_match.group(1)
-            param1 = action_match.group(2)
-            res_dict = {
-                'name': action_name,
-                'param': param1,
-                'action_type': OpType.FOLLOW_OBJ
-            }
+            if action_match.group(3):
+                res_dict = {
+                    'name': action_match.group(3),
+                    'param': "",
+                    'action_type': OpType.FOLLOW_OBJ
+                }
+            else:
+                action_name = action_match.group(1)
+                param1 = action_match.group(2)
+                res_dict = {
+                    'name': action_name,
+                    'param': param1,
+                    'action_type': OpType.FOLLOW_OBJ
+                }
             return res_dict
         else:
             print("[Output Extract]The input string does not match the ACTION pattern.")
@@ -758,12 +774,12 @@ def do_action_by_message(controller, sim_args, action_type, msg_string: str):
     find_flag = False
     for s in raw_msgs:
         pattern_t = r'^Thought\s*\[(\d+)\]:\s*(.*)$'
-        match = re.match(pattern_t, thought_str)
+        match = re.match(pattern_t, s)
         if match:
             thought_str = match.group(2)
         else:
             pattern_a = r'^Action\s*\[(\d+)\]:\s*(.*)$'
-            match = re.match(pattern_a, thought_str)
+            match = re.match(pattern_a, s)
             if match:
                 action_str = match.group(2)
                 find_flag = True
@@ -836,15 +852,22 @@ def do_action_by_message(controller, sim_args, action_type, msg_string: str):
                     "[Operation]event = controller.step(MoveAhead, %f)" % distance)
                 event = controller.step(
                     "MoveAhead", moveMagnitude=distance)
+        elif action_name == "RotateTo":
+            if direction_str in DIRECTION_DICT.keys():
+                direction = DIRECTION_DICT[direction_str]
+            else:
+                print("[Operation]Error: receiving direction name is invaild.")
+                return None
+            if direction > 0:
+                print(
+                    "[Operation]event = controller.step(RotateRight, %f)" % direction)
+                event = controller.step("RotateRight", degrees=direction)
         elif action_name == "Done":
             event = controller.step("Done")
             task_success = True
         else:
             print("[Operation]Error: receiving action name is invaild.")
             return None
-
-        # action_return_str = action_str + " " + \
-        #     direction_str + " " + str(value_float) + "m"
 
     elif result_type == OpType.FOLLOW_OBJ:
         action_name = result['name']
@@ -912,9 +935,9 @@ class SimArgs:
 
 class Agent:
 
-    def __init__(self, action_type=OpType.EIGHT_DIR_MOVE) -> None:
+    def __init__(self, action_type=OpType.EIGHT_DIR_MOVE, grid_size=0.25) -> None:
 
-        self.SIM_ARGS = SimArgs(640, 480, 45, 0.25, 3, True)
+        self.SIM_ARGS = SimArgs(640, 480, 45, grid_size, 3, True)
         self.DEG_UNIT = 45  # 每次旋转的间隔角度
         self.MAX_STEP = 16
         self.ACTION_TYPE = action_type
@@ -989,7 +1012,7 @@ class Agent:
                 return None
             distance = value_float
             # 执行旋转动作
-            if direction 0:
+            if direction > 0:
                 print(
                     "[Operation]event = controller.step(RotateRight, %f)" % direction)
                 event = self.controller.step("RotateRight", degrees=direction)
@@ -1031,9 +1054,10 @@ Action [1]: {last_action}"""
     def get_next_step_input(self, step, thought, action, history_list):
         obs, summarize_obs = get_observation(
             self.controller, self.SIM_ARGS, self.DEG_UNIT)
-        obs_str = get_observation_prompt()
+        obs_str = ""
         for each in obs:
             obs_str += each
+        obs_str += get_observation_prompt()
 
         if step == 1:
             new_history_str = self.get_first_history_prompt(thought, action)
@@ -1086,7 +1110,7 @@ Action [1]: {last_action}"""
         self.init_epsoide(ep)
 
         gpt_prompt = get_full_prompt(self.ACTION_TYPE,
-            self.SIM_ARGS.GRID_SIZE) + get_first_prompt(self.SIM_ARGS.target_object_type, self.init_observation)
+                                     self.SIM_ARGS) + get_first_prompt(self.SIM_ARGS.target_object_type, self.init_observation)
 
         if gpt_prompt:
             with open("./mannual_step_to_write.txt", 'w') as f:
@@ -1096,7 +1120,6 @@ Action [1]: {last_action}"""
 
     def mannual_do_step(self):
         MAX_STEP = self.MAX_STEP
-        GRID_SIZE = self.SIM_ARGS.GRID_SIZE
         try:
             self.step_count += 1
             if self.step_count > MAX_STEP:
@@ -1116,7 +1139,7 @@ Action [1]: {last_action}"""
             do_action_return = do_action_by_message(
                 self.controller,
                 self.SIM_ARGS,
-                action_type=OpType.EIGHT_DIR_MOVE,
+                action_type=self.ACTION_TYPE,
                 msg_string=reply)
 
             if do_action_return is None:
@@ -1154,7 +1177,7 @@ Action [1]: {last_action}"""
             self.write_records()
 
             next_gpt_prompt = get_full_prompt(self.ACTION_TYPE,
-                GRID_SIZE) + next_observation_input
+                                              self.SIM_ARGS) + next_observation_input
             with open("./mannual_step_to_write.txt", 'w') as f:
                 f.write(next_gpt_prompt)
 
@@ -1169,8 +1192,6 @@ Action [1]: {last_action}"""
     # 首次调用时，请先执行 init ep 以获得Controller
     def auto_do_nav_episode(self, ep):
         MAX_STEP = self.MAX_STEP
-        GRID_SIZE = self.SIM_ARGS.GRID_SIZE
-
         task_success = False
 
         gpt_prompt = ""
@@ -1192,10 +1213,10 @@ Action [1]: {last_action}"""
 
                 if self.step_count == 1:
                     gpt_prompt = get_full_prompt(self.ACTION_TYPE,
-                        GRID_SIZE) + get_first_prompt(self.SIM_ARGS.target_object_type, self.init_observation)
+                                                 self.SIM_ARGS) + get_first_prompt(self.SIM_ARGS.target_object_type, self.init_observation)
                 else:
                     gpt_prompt = get_full_prompt(self.ACTION_TYPE,
-                        GRID_SIZE) + next_observation_input
+                                                 self.SIM_ARGS) + next_observation_input
                 # print(f"<STEP:{step_count}>, prompt: {gpt_prompt}")
 
                 success = self.chatbot.start_new_conversation(
@@ -1214,7 +1235,7 @@ Action [1]: {last_action}"""
                 do_action_return = do_action_by_message(
                     self.controller,
                     self.SIM_ARGS,
-                    action_type=OpType.EIGHT_DIR_MOVE,
+                    action_type=self.ACTION_TYPE,
                     msg_string=reply)
 
                 if do_action_return is None:
@@ -1244,12 +1265,12 @@ Action [1]: {last_action}"""
 
             if task_success or self.SIM_ARGS.rules_achieve:
                 print("<Task Success Done!>")
-                return True
             else:
                 print("<Task Finished. But end up failed.>")
-                return False
+
+            return (task_success and 1 or 0, self.SIM_ARGS.rules_achieve and 1 or 0, True)
 
         except Exception as e:
             print(f"<Task exceeded by exception! Detail: {e}>")
             self.write_records()
-            return False
+            return (0, 0, False)
