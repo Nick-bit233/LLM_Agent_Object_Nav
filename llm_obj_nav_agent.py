@@ -32,8 +32,8 @@ def get_vaild_obj_types(event):
         if each["objectType"] not in vaild_obj_types:
             vaild_obj_types.append(each["objectType"])
 
-    print(len(vaild_obj_types))
-    print(vaild_obj_types)
+    print(f"vaild_obj_counts: {len(vaild_obj_types)}")
+    print(f"vaild_obj_list: {vaild_obj_types}")
     return vaild_obj_types
 
 # 计算物体相对相机的角度
@@ -306,7 +306,7 @@ def get_grid_observation_points(controller, deg_unit):
 
     degrees = int(
         round(agent_metadata['rotation']['y'] / deg_unit) * deg_unit)
-    print(f"[degrees]: {degrees}")
+    # print(f"[degrees]: {degrees}")
     # d_rad = np.radians(degrees)
     # dir_vector = np.array([np.sin(d_rad), 0, np.cos(d_rad)])
 
@@ -363,7 +363,7 @@ def get_max_access_distance(controller, sim_args, deg_unit):
             break
         res_point = next_point
 
-    print(f"RES Point: {res_point}")
+    # print(f"RES Point: {res_point}")
     distance = np.linalg.norm(
         np.array(res_point) - np.array(current_point))
     return distance
@@ -408,7 +408,7 @@ def get_direction_objs(dir_index, controller, sim_args, deg_unit):
         objs_detail = "No Interested Object."
 
     res_data = f"""
-    <Direction: {Directions[dir_index]}
+    <Direction: {Directions[dir_index]}>
     Objects detail: {objs_detail}
     Maximum distance of accessibility: "{Max_D:.2f}m"
     """
@@ -527,14 +527,12 @@ def draw_current_valid_points(controller, sim_args, deg_unit):
 #### run agent functions ####
 
 
-def init_llm_bots(is_proxy=False):
-    chatbot = gpt()
+def init_llm_bots():
+    chatbot = gpt(platform="closeai", proxy=False)
     chatbot.model_choose = "gpt-3.5-turbo"
-    chatbot.enable_proxy = is_proxy
 
-    summarize_bot = gpt()
+    summarize_bot = gpt(platform="ohmygpt", proxy=False)
     summarize_bot.model_choose = "gpt-3.5-turbo"
-    summarize_bot.enable_proxy = is_proxy
 
     return chatbot, summarize_bot
 
@@ -603,7 +601,7 @@ The "Move" action allows you to turn in a specified direction and then move forw
 
 You are very strict to next two rules: 
 (1) the length parameter MUST be an integer multiple of {GRID_SIZE} in meters. 
-(2) The direction parameter can only be choosen from this list:
+(2) The direction parameter can only be choosen from this Direction Name List:
 	[Front, Front Right, Right, Rear Right, Rear, Rear Left, Left, Front Left]
 """,
         OpType.FOLLOW_OBJ: f"""You can use make a move to next viewpoint which is closest to an certain object. Use Action Tool as this format:
@@ -611,11 +609,11 @@ You are very strict to next two rules:
 - Action: RotateTo [direction]
 - Action: Done
 
-The "MoveTo" action allows you to move to the closest position to a specific object. If you only need to turn to an object, use "RotateTo" action.
+The "MoveTo" action allows you to move to the closest position to a specific object. If you only need to turn to a direction, use "RotateTo" action.
 
 You are very strict to next rules: 
-(1) Only choose object_name that appears in this step’s observation. Never use nonexist or invisiable object_name. If you only need to turn to an object, use RotateTo action.
-(2) The direction parameter can only be choosen from this list:
+(1) The "object_name" parameter must be valid name of an object. You only choose object that appears in this step's observation. Never use nonexist object name or direction name as "object_name".
+(2) The "direction" parameter can only be choosen from this Direction Name List:
 	[Front, Front Right, Right, Rear Right, Rear, Rear Left, Left, Front Left]
 """
     }
@@ -862,6 +860,8 @@ def do_action_by_message(controller, sim_args, action_type, msg_string: str):
                 print(
                     "[Operation]event = controller.step(RotateRight, %f)" % direction)
                 event = controller.step("RotateRight", degrees=direction)
+            else:
+                event = controller.last_event  # 不执行动作，返回上一步的动作
         elif action_name == "Done":
             event = controller.step("Done")
             task_success = True
@@ -877,6 +877,8 @@ def do_action_by_message(controller, sim_args, action_type, msg_string: str):
             tele_obj_name = param_name
             print("[Operation]Teleport to object %s " % tele_obj_name)
             event = tele_to_object_nearby(controller, tele_obj_name)
+            if not event:
+                return None
         elif action_name == "RotateTo":
             if param_name in DIRECTION_DICT.keys():
                 direction = DIRECTION_DICT[param_name]
@@ -887,6 +889,8 @@ def do_action_by_message(controller, sim_args, action_type, msg_string: str):
                 print(
                     "[Operation]event = controller.step(RotateRight, %f)" % direction)
                 event = controller.step("RotateRight", degrees=direction)
+            else:
+                event = controller.last_event  # 不执行动作，返回上一步的动作
         elif action_name == "Done":
             event = controller.step("Done")
             task_success = True
@@ -1197,12 +1201,15 @@ Action [1]: {last_action}"""
         gpt_prompt = ""
         next_observation_input = ""
 
+        total_call_gpt_cost_time = 0
+
         # 初始化模拟器
         self.reset_epsoide(ep)
 
         sys_prompt = "You are an Embodied Agent, who interact with the environment and complete tasks for human."  # 初始化 system prompt
 
         try:
+            print(f"------------ \n< Task start. ep name:{ep['id']} >")
             while not task_success:
 
                 self.step_count += 1
@@ -1217,19 +1224,30 @@ Action [1]: {last_action}"""
                 else:
                     gpt_prompt = get_full_prompt(self.ACTION_TYPE,
                                                  self.SIM_ARGS) + next_observation_input
-                # print(f"<STEP:{step_count}>, prompt: {gpt_prompt}")
-
+                # ---Test time begin---
+                _test_begin_time = time.time()
                 success = self.chatbot.start_new_conversation(
                     sys_prompt, gpt_prompt)
-                time.sleep(1)
+                _test_end_time = time.time()
+                # time.sleep(1)
+                run_time = round(_test_end_time-_test_begin_time)
+                print(f"[Call GPT Cost Time: {run_time}s]")
+                total_call_gpt_cost_time += run_time
+
+                sleep_time = max(20 - run_time, 0)
+                time.sleep(sleep_time)
+                # ---Test time end---
+
                 if not success:
                     print("Error: call chatbot failed.")
                     break
                 reply = self.chatbot.get_last_chat_content()
-                print(f"<STEP:{self.step_count}reply: {reply}")
+                print(
+                    f"< STEP:{self.step_count} \n --reply: \n {reply} \n --reply end>")
 
                 # 先写日志，防止抛出异常
-                self.chat_logs.append(f"<STEP:{self.step_count}\n ")
+                self.chat_logs.append(
+                    f"< STEP:{self.step_count} \n --reply: \n ")
                 self.chat_logs.extend(self.chatbot.get_messages_list())
 
                 do_action_return = do_action_by_message(
@@ -1264,10 +1282,12 @@ Action [1]: {last_action}"""
             self.write_records()
 
             if task_success or self.SIM_ARGS.rules_achieve:
-                print("<Task Success Done!>")
+                print("<Task End. Result: Success Done!>")
             else:
-                print("<Task Finished. But end up failed.>")
+                print("<Task End. Result: Finished. But end up failed.>")
 
+            print(
+                f"<Task Call GPT Avg. time= {total_call_gpt_cost_time / self.step_count}>")
             return (task_success and 1 or 0, self.SIM_ARGS.rules_achieve and 1 or 0, True)
 
         except Exception as e:
