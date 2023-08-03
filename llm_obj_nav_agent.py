@@ -225,20 +225,20 @@ def get_json_objects_result(controller, sim_args, is_check_front_target=False):
         get_objects_around(sim_args, objs, horizon_deg,
                            detections, depth_frame)
 
-    if len(objs) <= 0:
-        return None
+    res_objs_in_3m = []
+    res_objs_byd_3m = []
 
-    res_objs_list = []
     for name in objs.keys():
         orientation_str = " and ".join([part for part in objs[name][0]])
         distance = objs[name][1]
-        if distance > sim_args.VISIBLE_DISTANCE:
-            distance_str = f"{distance:.2f}m[TOO FAR]"
-        else:
-            distance_str = f"{distance:.2f}m"
+        distance_str = f"{distance:.2f}m"
+
         new_obj = {name: "%s, %s" % (orientation_str, distance_str)}
 
-        res_objs_list.append(new_obj)
+        if distance > sim_args.VISIBLE_DISTANCE:
+            res_objs_byd_3m.append(new_obj)
+        else:
+            res_objs_in_3m.append(new_obj)
 
     if is_check_front_target:
         if sim_args.target_object_type in objs.keys():
@@ -253,8 +253,15 @@ def get_json_objects_result(controller, sim_args, is_check_front_target=False):
         action="Teleport",
         horizon=0
     )
-    json_data = json.dumps(res_objs_list)
-    return json_data
+    json_in_3m = json.dumps(res_objs_in_3m)
+    json_byd_3m = json.dumps(res_objs_byd_3m)
+
+    if len(res_objs_in_3m) <= 0:
+        json_in_3m = "No Interested Object."
+    if len(res_objs_byd_3m) <= 0:
+        json_byd_3m = "No Interested Object."
+
+    return json_in_3m, json_byd_3m
 
 # 获得可视物体详情(指定俯仰角度)
 
@@ -402,14 +409,13 @@ def get_direction_objs(dir_index, controller, sim_args, deg_unit):
         scene_description = "No Interested Object."
 
     is_check_front = dir_index == 0
-    objs_detail = get_json_objects_result(
+    objs_in_3m, objs_byd_3m = get_json_objects_result(
         controller, sim_args, is_check_front_target=is_check_front)
-    if objs_detail is None:
-        objs_detail = "No Interested Object."
 
     res_data = f"""
     <Direction: {Directions[dir_index]}>
-    Objects detail: {objs_detail}
+    Objects within 3m: {objs_in_3m}
+    Objects in 3m away: {objs_byd_3m}
     Maximum distance of accessibility: "{Max_D:.2f}m"
     """
     summarize_res_data = f"<Direction: {Directions[dir_index]}>, Objects you can see: {scene_description}"
@@ -528,7 +534,7 @@ def draw_current_valid_points(controller, sim_args, deg_unit):
 
 
 def init_llm_bots():
-    chatbot = gpt(platform="closeai", proxy=False)
+    chatbot = gpt(platform="ohmygpt", proxy=False)
     chatbot.model_choose = "gpt-3.5-turbo"
 
     summarize_bot = gpt(platform="ohmygpt", proxy=False)
@@ -576,8 +582,8 @@ def get_full_prompt(action_type, sim_args):
 You are an Embodied Agent and your task is finding a specific object in an indoor environment. You may not find it at once, so Let's work this out in a step by step way.
 In the first step, you will be given target object name. During navigation, at each step, you will receive messages, contains the history of the previous steps you have taken (including "Thought", "Action" and "Observation") and the observation of current viewpoint (including data of detected objects and distance you can move in 8 directions).
 RULES: 
-1、Your goal is to stop within 3 meters of the target object, while keeping it visiable (visiable means object appears in the Front direction of Observation data). 
-2、If the target object visible but not within 3 meters, move closer. 
+(1) Your goal is to stop within 3 meters of the target object, while keeping it visiable (visiable means object appears in the Front direction of Observation data). 
+(2) If the target object is visible but not within 3 meters, move closer. 
 3、If the target is within 3 meters but not visiable, rotate to let the object is in front of you.
 """
 
@@ -585,9 +591,9 @@ RULES:
 You are an Embodied Agent and your task is finding a specific object in an indoor environment. You may not find it at once, so Let's work this out in a step by step way.
 In the first step, you will be given target object name. During navigation, at each step, you will receive messages, contains the history of the previous steps you have taken (including "Thought", "Action" and "Observation") and the observation of current viewpoint (including data of detected objects and distance you can move in 8 directions).
 RULES: 
-1、Your goal is to stop within 3 meters of the target object. 
-2、If you can see the target object but it is not in 3 meters, try to move to a closer viewpoint. 
-3、If the target is within 3 meters, use the Action Tool to output the direction in which it is located. At this point, the task is over.
+(1) Your goal is to stop within 3 meters of the target object. 
+(2) If you can see the target object but it is more than 3 meters away, try to move to a closer viewpoint. 
+(3) If the target is within 3 meters, use the Action Tool to output the direction in which it is located. At this point, the task is over.
 """
 
     action_tool_prompt = {
@@ -746,23 +752,17 @@ def extract_action_command(action_type, action_str):
             return None
 
     if action_type == OpType.FOLLOW_OBJ:
-        action_pattern = r"\s*(MoveTo|RotateTo)\s*(.*)\s*|^(Done)$"
+        action_pattern = r"\s*(MoveTo|Done ObjectAt)\s*(.*)\s*"
         action_match = re.match(action_pattern, action_str)
         if action_match:
-            if action_match.group(3):
-                res_dict = {
-                    'name': action_match.group(3),
-                    'param': "",
-                    'action_type': OpType.FOLLOW_OBJ
-                }
-            else:
-                action_name = action_match.group(1)
-                param1 = action_match.group(2)
-                res_dict = {
-                    'name': action_name,
-                    'param': param1,
-                    'action_type': OpType.FOLLOW_OBJ
-                }
+            action_name = "MoveTo" if action_match.group(
+                1) == "MoveTo" else "Done"
+            param1 = action_match.group(2)
+            res_dict = {
+                'name': action_name,
+                'param': param1,
+                'action_type': OpType.FOLLOW_OBJ
+            }
             return res_dict
         else:
             print("[Output Extract]The input string does not match the ACTION pattern.")
@@ -893,21 +893,22 @@ def do_action_by_message(controller, sim_args, action_type, msg_string: str):
             event = tele_to_object_nearby(controller, tele_obj_name)
             if not event:
                 return None
-        elif action_name == "RotateTo":
+        elif action_name == "Done":
             if param_name in DIRECTION_DICT.keys():
                 direction = DIRECTION_DICT[param_name]
+                print(
+                    "[Operation]event = controller.step(RotateRight, %f)" % direction)
+                # Turn to done action dierction
+                event = controller.step("RotateRight", degrees=direction)
+                event = controller.step("Done")
+
+                # To check if actually success the task.
+                get_json_objects_result(
+                    controller, sim_args, is_check_front_target=True)
+                task_success = True
             else:
                 print("[Operation]Error: receiving direction name is invaild.")
                 return None
-            if direction > 0:
-                print(
-                    "[Operation]event = controller.step(RotateRight, %f)" % direction)
-                event = controller.step("RotateRight", degrees=direction)
-            else:
-                event = controller.last_event  # 不执行动作，返回上一步的动作
-        elif action_name == "Done":
-            event = controller.step("Done")
-            task_success = True
         else:
             print("[Operation]Error: receiving action name is invaild.")
             return None
@@ -1091,7 +1092,7 @@ Action [1]: {last_action}"""
         for each in history_list:
             next_input_str += each
 
-        next_input_str += f"""Observation [{step + 1}]: \n {obs_str}"""
+        next_input_str += f"""\nObservation [{step + 1}]: \n {obs_str}"""
         return next_input_str
 
     def init_epsoide(self, ep):
@@ -1223,14 +1224,22 @@ Action [1]: {last_action}"""
         sys_prompt = "You are an Embodied Agent, who interact with the environment and complete tasks for human."  # 初始化 system prompt
 
         try:
-            print(f"------------ \n< Task start. ep name:{ep['id']} >")
+            print(f"-------------------- \n< Task start. ep name:{ep['id']} >")
+            # 先写日志，防止抛出异常
+            self.chat_logs.append(
+                f"-------------------- \n< Task start. ep name:{ep['id']} >")
+            s
             while not task_success:
 
                 self.step_count += 1
 
                 if self.step_count > MAX_STEP:
                     print("Error: MAX step tries reached.")
+                    self.chat_logs.append("<Error: MAX step tries reached.>")
                     break
+                else:
+                    self.chat_logs.append(
+                        f"-------------------- \n <STEP: {self.step_count}>\n ")
 
                 if self.step_count == 1:
                     gpt_prompt = get_full_prompt(self.ACTION_TYPE,
@@ -1254,14 +1263,12 @@ Action [1]: {last_action}"""
 
                 if not success:
                     print("Error: call chatbot failed.")
+                    self.chat_logs.append("<Error: call chatbot failed.>")
                     break
                 reply = self.chatbot.get_last_chat_content()
                 print(
                     f"< STEP:{self.step_count} \n --reply: \n {reply} \n --reply end>")
 
-                # 先写日志，防止抛出异常
-                self.chat_logs.append(
-                    f"< STEP:{self.step_count} \n --reply: \n ")
                 self.chat_logs.extend(self.chatbot.get_messages_list())
 
                 do_action_return = do_action_by_message(
@@ -1271,7 +1278,9 @@ Action [1]: {last_action}"""
                     msg_string=reply)
 
                 if do_action_return is None:
-                    print("Error: do action failed.")
+                    self.chat_logs.append(
+                        "<Do Action Result: do_action_return None. --> Failed.>")
+                    print("Do Action Result: do_action_return None. --> Failed.")
                     break
                 else:
                     event, thought, action, task_success = do_action_return
@@ -1281,6 +1290,8 @@ Action [1]: {last_action}"""
                         action=action,
                         history_list=self.history_result_prompts
                     )
+                    self.chat_logs.append(
+                        f"<Do Action Result: action: {action} >")
                     # 写入路径记录
                     self.paths.append({
                         "point": event.metadata['agent']['position'],
@@ -1288,23 +1299,24 @@ Action [1]: {last_action}"""
                     })
 
                     if not event.metadata['lastActionSuccess']:
-                        print("Error: Agent did invaild move! Detail: %s" %
-                              event.metadata["errorMessage"])
+                        print(
+                            f"Do Action Error: Agent did invaild move! Detail: {event.metadata['errorMessage']} --> Failed.")
+                        self.chat_logs.append(
+                            f"Do Action Error: Agent did invaild move! Detail: {event.metadata['errorMessage']} --> Failed.")
                         break
-                # print(
-                #     f"<STEP:{self.step_count}history_result_prompts len: {len(self.history_result_prompts)}")
+
             self.write_records()
 
-            if task_success or self.SIM_ARGS.rules_achieve:
-                print("<Task End. Result: Success Done!>")
-            else:
-                print("<Task End. Result: Finished. But end up failed.>")
-
+            print(f"<Task End.> Result: \n\tLLM success={task_success} \n\tRule success={self.SIM_ARGS.rules_achieve}")
+            self.chat_logs.append(
+                f"<Task End.> Result: \n\tLLM success={task_success} \n\tRule success={self.SIM_ARGS.rules_achieve}")
             print(
                 f"<Task Call GPT Avg. time= {total_call_gpt_cost_time / self.step_count}>")
             return (task_success and 1 or 0, self.SIM_ARGS.rules_achieve and 1 or 0, True)
 
         except Exception as e:
-            print(f"<Task exceeded by exception! Detail: {e}>")
+            print(f"//////Task exceeded by exception! Detail: {e}//////")
+            self.chat_logs.append(
+                f"////// Task exceeded by exception! Detail: {e}//////")
             self.write_records()
             return (0, 0, False)
