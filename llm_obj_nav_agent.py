@@ -229,12 +229,12 @@ def get_json_objects_result(controller, sim_args, is_check_front_target=False):
     res_objs_byd_3m = []
 
     for name in objs.keys():
-        orientation_str = " and ".join([part for part in objs[name][0]])
+        # orientation_str = " and ".join([part for part in objs[name][0]])
         distance = objs[name][1]
         distance_str = f"{distance:.2f}m"
 
-        new_obj = {name: "%s, %s" % (orientation_str, distance_str)}
-
+        # new_obj = {name: "%s, %s" % (orientation_str, distance_str)}
+        new_obj = {name: distance_str}  # 不使用 orientation_str 的情况
         if distance > sim_args.VISIBLE_DISTANCE:
             res_objs_byd_3m.append(new_obj)
         else:
@@ -257,9 +257,9 @@ def get_json_objects_result(controller, sim_args, is_check_front_target=False):
     json_byd_3m = json.dumps(res_objs_byd_3m)
 
     if len(res_objs_in_3m) <= 0:
-        json_in_3m = "No Interested Object."
+        json_in_3m = "No objects"
     if len(res_objs_byd_3m) <= 0:
-        json_byd_3m = "No Interested Object."
+        json_byd_3m = "No objects"
 
     return json_in_3m, json_byd_3m
 
@@ -578,95 +578,123 @@ Action [{step}]: {last_action}
 
 def get_full_prompt(action_type, sim_args):
     GRID_SIZE = sim_args.GRID_SIZE
-    principal_prompt = f"""
-You are an Embodied Agent and your task is finding a specific object in an indoor environment. You may not find it at once, so Let's work this out in a step by step way.
-In the first step, you will be given target object name. During navigation, at each step, you will receive messages, contains the history of the previous steps you have taken (including "Thought", "Action" and "Observation") and the observation of current viewpoint (including data of detected objects and distance you can move in 8 directions).
-RULES: 
-(1) Your goal is to stop within 3 meters of the target object, while keeping it visiable (visiable means object appears in the Front direction of Observation data). 
-(2) If the target object is visible but not within 3 meters, move closer. 
-3、If the target is within 3 meters but not visiable, rotate to let the object is in front of you.
+    principal_prompt = f"""You are an intelligent Embodied Agent in an indoor environment. Your task is finding a specific object.
+This task will proceed step by step, and you only need to think what to do in a particular step.
+After the "Begin!" sign, you will receive: target object name, a list of "Thought", "Action" and "Observation(briefly)" history, and "Observation(full)" in this step.
+
+RULES: Stop within 3 meters of the target object, while keeping it visiable (visiable means object is in Front direction of Observation data). 
+
+At each step, you need to do two things: 
+(1) Output your reasoning in the "Thought" section. Consider: have I found the target object? If not, which direction should I move to next?
+(2) Output your action command use the Action Tool, ensure it can be parsed according to the following requirements.
+
 """
 
-    principal_prompt_follow_obj = f"""
-You are an Embodied Agent and your task is finding a specific object in an indoor environment. You may not find it at once, so Let's work this out in a step by step way.
-In the first step, you will be given target object name. During navigation, at each step, you will receive messages, contains the history of the previous steps you have taken (including "Thought", "Action" and "Observation") and the observation of current viewpoint (including data of detected objects and distance you can move in 8 directions).
-RULES: 
-(1) Your goal is to stop within 3 meters of the target object. 
-(2) If you can see the target object but it is more than 3 meters away, try to move to a closer viewpoint. 
-(3) If the target is within 3 meters, use the Action Tool to output the direction in which it is located. At this point, the task is over.
+    principal_prompt_follow_obj = f"""You are an intelligent Embodied Agent in an indoor environment. Your task is finding a specific object.
+This task will proceed step by step, and you only need to think what to do in a particular step.
+After the "Begin!" sign, you will receive: target object name, a list of "Thought", "Action" and "Observation(briefly)" history, and "Observation(full)" in this step.
+
+RULES: Stop when target object is within 3 meters, and output the direction in which it is located by the "Done" Action.
+
+At each step, you need to do two things: 
+(1) Output your reasoning in the "Thought" section. Consider: have I found the target object? If not, which object should I move to next?
+(2) Output your action command use the Action Tool, ensure it can be parsed according to the following requirements.
 """
 
     action_tool_prompt = {
-        OpType.DEFAULT_MOVE: f"""Use Action Tool as the following format:
-- Action: [name] [parameter]
+        OpType.DEFAULT_MOVE: f"""
+Usage of Action Tool:
+Command Format: "Action: [name] [parameter]"
+"[]" stands for parameter, you don't need to enter it when passing the parameter.
 
-TIPS: You can only take actions from the following Actions List. You are very strict to the Actionn Name, never use nonexistent Action Names. 
-Some Actions has parameters, using "[]" stands for parameter, you don't need to enter it when passing the parameter. All parameters are positive numbers with {GRID_SIZE} as the smallest unit. 
-
-Actions List:
-- MoveAhead [length] : This action means move towards your Front direction by [length] meters, default with {GRID_SIZE} meters
-- RotateRight [degrees] : This action means rotate to your right by a certain angle. e.g. rotate to Front Right, degrees=45, rotate to Right, degrees=90, rotate to Rear Left, degrees=215
-- Done
+Only choose parameter "name" from the following Actions List:
+- MoveAhead [length] : Move towards Front direction by [length] meters, length must be an integer multiple of {GRID_SIZE} meters.
+- RotateRight [degrees] : Rotate to right by a certain angle. e.g. degrees=90 : rotate to Right, degrees=215 : rotate to Rear Left
+- Done : Indicates completion of the task.
 """,
-        OpType.EIGHT_DIR_MOVE: f"""Take action to move around the room. Use Action Tool as this format:
+        OpType.EIGHT_DIR_MOVE: f"""
+Usage of Action Tool:
+Choose ONE of three commands:
 - Action: Move [direction] [length]
 - Action: RotateTo [direction]
 - Action: Done
 
-The "Move" action allows you to turn in a specified direction and then move forward a distance. It has two parameters: direction and length, where the [] just used to identify the parameter, you don't need to enter it when passing the parameter. If you only need to turn to a direction, use "RotateTo" action.
+Explanations:
+"Move" action : turn to [direction] and then move forward a distance of [length].  
+"RotateTo" action: only turn to [direction], no forward movement.
+"[]" just used to identify the parameter, you don't need to enter it when passing the parameter.
 
-You are very strict to next two rules: 
-(1) the length parameter MUST be an integer multiple of {GRID_SIZE} in meters. 
-(2) The direction parameter can only be choosen from this Direction Name List:
+You are very strict to next two instructions:
+(1) the "length" parameter MUST be an integer multiple of {GRID_SIZE} in meters. 
+(2) The "direction" parameter can only be choosen from:
 	[Front, Front Right, Right, Rear Right, Rear, Rear Left, Left, Front Left]
 """,
-        OpType.FOLLOW_OBJ: f"""Use Action Tool as this format:
+        OpType.FOLLOW_OBJ: f"""
+Usage of Action Tool:
+Choose ONE of two commands:
 - Action: MoveTo [object_name]
 - Action: Done ObjectAt [direction]
 
-The "MoveTo" action allows you to move to the closest position to a specific object. 
-If you have found the target object, use "Done" action, and output the direction of the target object by "direction" parameter .
+Explanations:
+"MoveTo" action : Move directly to the closest position to a specific object. 
+"Done" action : Use it when target is found.
 
-You are very strict to next rules: 
-(1) The "object_name" parameter must be valid name of an object. You only choose object that appears in this step's observation. Never use nonexist object name or direction name as "object_name".
-(2) You can't output the name of the Target Object as a parameter of the "object_name", unless the target object is already in the visible observation, at which point you should output a Done action. 
-(3) The "direction" parameter can only be choosen from this Direction Name List:
+You are very strict to next instructions:
+(1) The "object_name" parameter must be valid name of an object. Only choose names that appears in this step's observation. Don't use direction name.
+(2) Never use target object name as "object_name" parameter. If target object is already in view, you must output a "Done" action. 
+(3) The "direction" parameter can only be choosen from:
 	[Front, Front Right, Right, Rear Right, Rear, Rear Left, Left, Front Left]
 """
     }
 
-    nav_tips_prompt = f"""
-At each step, you should consider: 
-(1) According to the RULES, have you found the target object? If yes, you should output "Action: Done" to stop. Or you should continue.
-(2) Consider where you are on the environment and where should be the next viewpoint to navigate in order to find the target object. Then use the Action tool, trying to move to that location. Show your reasoning in the Thought section. 
-"""
+#     nav_tips_prompt = f"""
+# At each step, you should consider:
+# (1) According to the RULES, have you found the target object? If yes, you should output "Action: Done" to stop. Or you should continue.
+# (2) Consider where you are on the environment and where should be the next viewpoint to navigate in order to find the target object. Then use the Action tool, trying to move to that location. Show your reasoning in the Thought section.
+# """
 
-    format_prompt = """Starting below, you should follow this format:
+    format_prompt = """Starting below, follow this format:
 ---
-Target: (the name of the target object, always keep it in mind)
-Initial Observation [1]: (initial observation of the environment)
-Thought [1]: (always think about what to do next and why)
-Action [1]: (the action to take. If you take action that has parameters, passing vaild parameters)
-Observation [2]: (next observation after you took an action)
+Target: (name of the target object)
+Initial Observation [1]: (...)
+Thought [1]: (The thought you generate)
+Action [1]: (The action you generate)
+Observation [2]: (next observation)
 ... 
 (this Observation/Thought/Action pattern can repeat N times)
 ...
 Thought [N]: I have found the target object, I can stop. 
 Action [N]: Done
+---
+"""
+
+    format_prompt_follow_obj = """Starting below, follow this format:
+---
+Target: (name of the target object)
+Initial Observation [1]: (...)
+Thought [1]: (The thought you generate)
+Action [1]: (The action you generate)
+Observation [2]: (next observation)
+... 
+(this Observation/Thought/Action pattern can repeat N times)
+...
+Thought [N]: I have found the target object, I can stop. 
+Action [N]: Done ObjectAt [direction]
+---
 """
 
     if action_type == OpType.FOLLOW_OBJ:
-        return principal_prompt_follow_obj + action_tool_prompt[action_type] + nav_tips_prompt + format_prompt
+        return principal_prompt_follow_obj + action_tool_prompt[action_type] + format_prompt_follow_obj
     else:
-        return principal_prompt + action_tool_prompt[action_type] + nav_tips_prompt + format_prompt
+        return principal_prompt + action_tool_prompt[action_type] + format_prompt
 
 
-def get_observation_prompt():
-    observation_tips_prompt = f"""
-    TIPS: Each object in "Objects detail" section is in this format:" '(name)':'(approximate position, based on current view) (distance)' "
-    And the Maximum distance of accessibility sectionis the max distance you can travel in that direction without hitting an obstacle.
-"""
-    return observation_tips_prompt
+# def get_observation_prompt():
+#     observation_tips_prompt = f"""
+#     TIPS: Each object in "Objects detail" section is in this format:" '(name)':'(approximate position, based on current view) (distance)' "
+#     And the Maximum distance of accessibility sectionis the max distance you can travel in that direction without hitting an obstacle.
+# """
+#     return observation_tips_prompt
 
 
 def get_first_prompt(target_object_type, init_observation):
@@ -1065,7 +1093,7 @@ Action [1]: {last_action}"""
         res = ""
         for each in obs:
             res += each
-        res += get_observation_prompt()
+        # res += get_observation_prompt()
 
         # return: observation, summrize_oberservation
         return res, "\n".join(s_obs)
@@ -1076,7 +1104,7 @@ Action [1]: {last_action}"""
         obs_str = ""
         for each in obs:
             obs_str += each
-        obs_str += get_observation_prompt()
+        # obs_str += get_observation_prompt()
 
         if step == 1:
             new_history_str = self.get_first_history_prompt(thought, action)
@@ -1228,7 +1256,6 @@ Action [1]: {last_action}"""
             # 先写日志，防止抛出异常
             self.chat_logs.append(
                 f"-------------------- \n< Task start. ep name:{ep['id']} >")
-            s
             while not task_success:
 
                 self.step_count += 1
@@ -1307,7 +1334,8 @@ Action [1]: {last_action}"""
 
             self.write_records()
 
-            print(f"<Task End.> Result: \n\tLLM success={task_success} \n\tRule success={self.SIM_ARGS.rules_achieve}")
+            print(
+                f"<Task End.> Result: \n\tLLM success={task_success} \n\tRule success={self.SIM_ARGS.rules_achieve}")
             self.chat_logs.append(
                 f"<Task End.> Result: \n\tLLM success={task_success} \n\tRule success={self.SIM_ARGS.rules_achieve}")
             print(
