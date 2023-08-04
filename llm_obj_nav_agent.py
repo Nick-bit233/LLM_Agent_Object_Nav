@@ -796,12 +796,33 @@ def extract_action_command(action_type, action_str):
             print("[Output Extract]The input string does not match the ACTION pattern.")
             return None
 
+
+def log_action_trajectorys(agent, action_log, event):
+    # 写入路径记录
+    pos = event.metadata['agent']['position']
+    agent.trajectorys.append({
+        "x": pos['x'],
+        "y": pos['y'],
+        "z": pos['z'],
+        "rotation": event.metadata['agent']['rotation'],
+        "horizon": event.metadata['agent']['cameraHorizon']
+    })
+    agent.actions.append({
+        "action": action_log,
+        "success": event.metadata['lastActionSuccess'],
+        "rules_achieve": agent.SIM_ARGS.rules_achieve
+    })
+
+
 # do action, return event
 # 解析器支持三种不同粒度格式的prompt
 
 
-def do_action_by_message(controller, sim_args, action_type, msg_string: str):
+def do_action_by_message(agent, msg_string: str):
     task_success = False
+    controller = agent.controller
+    sim_args = agent.SIM_ARGS
+    action_type = agent.ACTION_TYPE
 
     # 默认参数值
     direction = 0
@@ -841,28 +862,30 @@ def do_action_by_message(controller, sim_args, action_type, msg_string: str):
         param_value = result['param']
         ACTION_MOVE_LIST = ["MoveAhead", "MoveBack"]
         ACTION_ROTATE_LIST = ["RotateLeft", "RotateRight"]
-        ACTION_OTHER_LIST = ["LookUp", "LookDown"]
-        if action_name not in ACTION_MOVE_LIST+ACTION_ROTATE_LIST+ACTION_OTHER_LIST:
+        # ACTION_OTHER_LIST = ["LookUp", "LookDown"]
+        if action_name not in ACTION_MOVE_LIST+ACTION_ROTATE_LIST:
             print("[Operation]Error: receiving action name is invaild.")
             return None
         elif not param_value:
             print("[Operation]event = controller.step(%s)" % action_name)
-            event = controller.step(action_name)
-        else:
-            if action_name in ACTION_MOVE_LIST:
-                print("[Operation]event = controller.step(%s, %f)" %
-                      (action_name, param_value))
-                event = controller.step(action_name, moveMagnitude=param_value)
-            elif action_name in ACTION_ROTATE_LIST:
-                print("[Operation]event = controller.step(%s, %f)" %
-                      (action_name, param_value))
-                event = controller.step(action_name, degrees=param_value)
-            elif action_name == "Done":
+
+            if action_name == "Done":
                 event = controller.step("Done")
                 task_success = True
             else:
-                print("[Operation]Error: receiving action name is invaild.")
-                return None
+                event = controller.step(action_name)
+
+            log_action_trajectorys(agent, action_name, event)
+        else:
+            print("[Operation]event = controller.step(%s, %f)" %
+                  (action_name, param_value))
+            if action_name in ACTION_MOVE_LIST:
+                event = controller.step(action_name, moveMagnitude=param_value)
+            elif action_name in ACTION_ROTATE_LIST:
+                event = controller.step(action_name, degrees=param_value)
+
+            log_action_trajectorys(
+                agent, action_name + " " + param_value, event)
 
     elif result_type == OpType.EIGHT_DIR_MOVE:
         action_name = result['name']
@@ -881,17 +904,15 @@ def do_action_by_message(controller, sim_args, action_type, msg_string: str):
                 print(
                     "[Operation]event = controller.step(RotateRight, %f)" % direction)
                 event = controller.step("RotateRight", degrees=direction)
+                log_action_trajectorys(
+                    agent, f"RotateRight {direction}", event)
             else:
                 event = controller.last_event  # 不执行动作，返回上一步的动作
             # 执行移动动作
-            if distance <= 0.1 * sim_args.GRID_SIZE:
-                print("[Operation]Do not move ahead, raw distance: %f)" %
-                      distance)
-            else:
-                print(
-                    "[Operation]event = controller.step(MoveAhead, %f)" % distance)
-                event = controller.step(
-                    "MoveAhead", moveMagnitude=distance)
+            print("[Operation]event = controller.step(MoveAhead, %f)" % distance)
+            event = controller.step("MoveAhead", moveMagnitude=distance)
+            log_action_trajectorys(agent, f"MoveAhead {distance}", event)
+
         elif action_name == "RotateTo":
             if direction_str in DIRECTION_DICT.keys():
                 direction = DIRECTION_DICT[direction_str]
@@ -902,10 +923,13 @@ def do_action_by_message(controller, sim_args, action_type, msg_string: str):
                 print(
                     "[Operation]event = controller.step(RotateRight, %f)" % direction)
                 event = controller.step("RotateRight", degrees=direction)
+                log_action_trajectorys(
+                    agent, f"RotateRight {direction}", event)
             else:
                 event = controller.last_event  # 不执行动作，返回上一步的动作
         elif action_name == "Done":
             event = controller.step("Done")
+            log_action_trajectorys(agent, action_name, event)
             task_success = True
         else:
             print("[Operation]Error: receiving action name is invaild.")
@@ -921,14 +945,22 @@ def do_action_by_message(controller, sim_args, action_type, msg_string: str):
             event = tele_to_object_nearby(controller, tele_obj_name)
             if not event:
                 return None
+            log_action_trajectorys(agent, "Teleport", event)
+
         elif action_name == "Done":
             if param_name in DIRECTION_DICT.keys():
                 direction = DIRECTION_DICT[param_name]
                 print(
                     "[Operation]event = controller.step(RotateRight, %f)" % direction)
-                # Turn to done action dierction
+                # Turn to dierction before done action
                 event = controller.step("RotateRight", degrees=direction)
+                log_action_trajectorys(
+                    agent, f"RotateRight {direction}", event)
+
+                # Do done action
                 event = controller.step("Done")
+                log_action_trajectorys(
+                    agent, "Done", event)
 
                 # To check if actually success the task.
                 get_json_objects_result(
@@ -999,12 +1031,15 @@ class Agent:
     init_observation = ""
     init_summarize = ""
 
+    ep_name = ""
+    ep_index = 0
     chat_logs = []  # 记录日志
     history_result_prompts = []
-    paths = []  # 记录移动轨迹
+    trajectorys = []  # 记录移动轨迹
+    actions = []  # 记录行动
 
     log_file_path = "./gpt_output.txt"
-    record_file_path = "./test_path_record.txt"
+    record_file_path = "./test_path_record.json"
 
     ### debug section ###
     def draw_position_points(self):
@@ -1072,8 +1107,13 @@ class Agent:
 
     def write_records(self):
         write_chat_log(self.log_file_path, self.chat_logs)
-        path_record = json.dumps(self.paths)
-        write_record_file(self.record_file_path, path_record)
+        record = {
+            "trajectory": self.trajectorys,
+            "actions_taken": self.actions,
+            "success": self.SIM_ARGS.rules_achieve
+        }
+        record_content = json.dumps(record)
+        write_record_file(self.record_file_path, record_content)
 
     def get_first_history_prompt(self, last_thought, last_action):
         reply, success = call_gpt_summarize_history(
@@ -1127,7 +1167,8 @@ Action [1]: {last_action}"""
         self.step_count = 0  # 重置step count
         self.chat_logs.clear()
         self.history_result_prompts.clear()
-        self.paths.clear()
+        self.trajectorys.clear()
+        self.actions.clear()
         self.SIM_ARGS.rules_achieve = False
 
         # 先调用，以获得Controller和初始位置event
@@ -1142,7 +1183,8 @@ Action [1]: {last_action}"""
         self.step_count = 0  # 重置step count
         self.chat_logs.clear()
         self.history_result_prompts.clear()
-        self.paths.clear()
+        self.trajectorys.clear()
+        self.actions.clear()
         self.SIM_ARGS.rules_achieve = False
 
         init_event, self.SIM_ARGS.target_object_type = reset_scene_by_episode(
@@ -1183,11 +1225,7 @@ Action [1]: {last_action}"""
             self.chat_logs.append(f"<STEP:{self.step_count}\n ")
             self.chat_logs.append(reply)
 
-            do_action_return = do_action_by_message(
-                self.controller,
-                self.SIM_ARGS,
-                action_type=self.ACTION_TYPE,
-                msg_string=reply)
+            do_action_return = do_action_by_message(self, msg_string=reply)
 
             if do_action_return is None:
                 print("Error: do action failed.")
@@ -1201,12 +1239,6 @@ Action [1]: {last_action}"""
                     action=action,
                     history_list=self.history_result_prompts
                 )
-                # 写入路径记录
-                self.paths.append({
-                    "point": event.metadata['agent']['position'],
-                    "rules_achieve": self.SIM_ARGS.rules_achieve
-                })
-
             # print(
             #     f"<STEP:{self.step_count}history_result_prompts len: {len(self.history_result_prompts)}")
 
@@ -1238,6 +1270,7 @@ Action [1]: {last_action}"""
     # 全自动流程
     # 首次调用时，请先执行 init ep 以获得Controller
     def auto_do_nav_episode(self, ep):
+        self.ep_name = ep['id']
         MAX_STEP = self.MAX_STEP
         task_success = False
 
@@ -1245,17 +1278,17 @@ Action [1]: {last_action}"""
         next_observation_input = ""
 
         total_call_gpt_cost_time = 0
-
         # 初始化模拟器
         self.reset_epsoide(ep)
 
         sys_prompt = "You are an Embodied Agent, who interact with the environment and complete tasks for human."  # 初始化 system prompt
 
         try:
-            print(f"-------------------- \n< Task start. ep name:{ep['id']} >")
+            print(
+                f"-------------------- \n< Task start. ep name:{self.ep_name} >")
             # 先写日志，防止抛出异常
             self.chat_logs.append(
-                f"-------------------- \n< Task start. ep name:{ep['id']} >")
+                f"-------------------- \n< Task start. ep name:{self.ep_name} >")
             while not task_success:
 
                 self.step_count += 1
@@ -1298,11 +1331,7 @@ Action [1]: {last_action}"""
 
                 self.chat_logs.extend(self.chatbot.get_messages_list())
 
-                do_action_return = do_action_by_message(
-                    self.controller,
-                    self.SIM_ARGS,
-                    action_type=self.ACTION_TYPE,
-                    msg_string=reply)
+                do_action_return = do_action_by_message(self, msg_string=reply)
 
                 if do_action_return is None:
                     self.chat_logs.append(
@@ -1319,11 +1348,6 @@ Action [1]: {last_action}"""
                     )
                     self.chat_logs.append(
                         f"<Do Action Result: action: {action} >")
-                    # 写入路径记录
-                    self.paths.append({
-                        "point": event.metadata['agent']['position'],
-                        "rules_achieve": self.SIM_ARGS.rules_achieve
-                    })
 
                     if not event.metadata['lastActionSuccess']:
                         print(
