@@ -1,0 +1,14 @@
+{
+    "URLS": {
+        "openai": "https://api.openai.com/",
+        "closeai": "https://api.closeai-proxy.xyz/"
+    },
+    "API_KEYS": {
+        "openai": "",
+        "closeai": ""
+    },
+    "proxies": {
+        "http": "",
+        "https": ""
+    }
+}

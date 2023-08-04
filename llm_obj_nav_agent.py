@@ -225,20 +225,20 @@ def get_json_objects_result(controller, sim_args, is_check_front_target=False):
         get_objects_around(sim_args, objs, horizon_deg,
                            detections, depth_frame)
 
-    if len(objs) <= 0:
-        return None
+    res_objs_in_3m = []
+    res_objs_byd_3m = []
 
-    res_objs_list = []
     for name in objs.keys():
-        orientation_str = " and ".join([part for part in objs[name][0]])
+        # orientation_str = " and ".join([part for part in objs[name][0]])
         distance = objs[name][1]
-        if distance > sim_args.VISIBLE_DISTANCE:
-            distance_str = f"{distance:.2f}m[TOO FAR]"
-        else:
-            distance_str = f"{distance:.2f}m"
-        new_obj = {name: "%s, %s" % (orientation_str, distance_str)}
+        distance_str = f"{distance:.2f}m"
 
-        res_objs_list.append(new_obj)
+        # new_obj = {name: "%s, %s" % (orientation_str, distance_str)}
+        new_obj = {name: distance_str}  # 不使用 orientation_str 的情况
+        if distance > sim_args.VISIBLE_DISTANCE:
+            res_objs_byd_3m.append(new_obj)
+        else:
+            res_objs_in_3m.append(new_obj)
 
     if is_check_front_target:
         if sim_args.target_object_type in objs.keys():
@@ -253,8 +253,15 @@ def get_json_objects_result(controller, sim_args, is_check_front_target=False):
         action="Teleport",
         horizon=0
     )
-    json_data = json.dumps(res_objs_list)
-    return json_data
+    json_in_3m = json.dumps(res_objs_in_3m)
+    json_byd_3m = json.dumps(res_objs_byd_3m)
+
+    if len(res_objs_in_3m) <= 0:
+        json_in_3m = "No objects"
+    if len(res_objs_byd_3m) <= 0:
+        json_byd_3m = "No objects"
+
+    return json_in_3m, json_byd_3m
 
 # 获得可视物体详情(指定俯仰角度)
 
@@ -402,14 +409,13 @@ def get_direction_objs(dir_index, controller, sim_args, deg_unit):
         scene_description = "No Interested Object."
 
     is_check_front = dir_index == 0
-    objs_detail = get_json_objects_result(
+    objs_in_3m, objs_byd_3m = get_json_objects_result(
         controller, sim_args, is_check_front_target=is_check_front)
-    if objs_detail is None:
-        objs_detail = "No Interested Object."
 
     res_data = f"""
     <Direction: {Directions[dir_index]}>
-    Objects detail: {objs_detail}
+    Objects within 3m: {objs_in_3m}
+    Objects in 3m away: {objs_byd_3m}
     Maximum distance of accessibility: "{Max_D:.2f}m"
     """
     summarize_res_data = f"<Direction: {Directions[dir_index]}>, Objects you can see: {scene_description}"
@@ -528,7 +534,7 @@ def draw_current_valid_points(controller, sim_args, deg_unit):
 
 
 def init_llm_bots():
-    chatbot = gpt(platform="closeai", proxy=False)
+    chatbot = gpt(platform="ohmygpt", proxy=False)
     chatbot.model_choose = "gpt-3.5-turbo"
 
     summarize_bot = gpt(platform="ohmygpt", proxy=False)
@@ -572,81 +578,123 @@ Action [{step}]: {last_action}
 
 def get_full_prompt(action_type, sim_args):
     GRID_SIZE = sim_args.GRID_SIZE
-    principal_prompt = f"""
-You are an Embodied Agent and your task is finding a specific object in an indoor environment. You may not find it at once, so Let's work this out in a step by step way.
-In the first step, you will be given target object name. During navigation, at each step, you will receive a INPUT, contains the history of the previous steps you have taken (including "Thought", "Action" and "Observation") and the observation of current viewpoint (including data of detected objects and distance you can move in 8 directions).
-RULES: 
-1、Your goal is to stop within 3 meters of the target object, while keeping it visiable. 
-2、If the target object visible but not within 3 meters, move closer. 
-3、If the target is within 3 meters but not visiable, rotate to let the object is in front of you.
+    principal_prompt = f"""You are an intelligent Embodied Agent in an indoor environment. Your task is finding a specific object.
+This task will proceed step by step, and you only need to think what to do in a particular step.
+After the "Begin!" sign, you will receive: target object name, a list of "Thought", "Action" and "Observation(briefly)" history, and "Observation(full)" in this step.
+
+RULES: Stop within 3 meters of the target object, while keeping it visiable (visiable means object is in Front direction of Observation data). 
+
+At each step, you need to do two things: 
+(1) Output your reasoning in the "Thought" section. Consider: have I found the target object? If not, which direction should I move to next?
+(2) Output your action command use the Action Tool, ensure it can be parsed according to the following requirements.
+
 """
+
+    principal_prompt_follow_obj = f"""You are an intelligent Embodied Agent in an indoor environment. Your task is finding a specific object.
+This task will proceed step by step, and you only need to think what to do in a particular step.
+After the "Begin!" sign, you will receive: target object name, a list of "Thought", "Action" and "Observation(briefly)" history, and "Observation(full)" in this step.
+
+RULES: Stop when target object is within 3 meters, and output the direction in which it is located by the "Done" Action.
+
+At each step, you need to do two things: 
+(1) Output your reasoning in the "Thought" section. Consider: have I found the target object? If not, which object should I move to next?
+(2) Output your action command use the Action Tool, ensure it can be parsed according to the following requirements.
+"""
+
     action_tool_prompt = {
-        OpType.DEFAULT_MOVE: f"""Use Action Tool as the following format:
-- Action: [name] [parameter]
+        OpType.DEFAULT_MOVE: f"""
+Usage of Action Tool:
+Command Format: "Action: [name] [parameter]"
+"[]" stands for parameter, you don't need to enter it when passing the parameter.
 
-TIPS: You can only take actions from the following Actions List. You are very strict to the Actionn Name, never use nonexistent Action Names. 
-Some Actions has parameters, using "[]" stands for parameter, you don't need to enter it when passing the parameter. All parameters are positive numbers with {GRID_SIZE} as the smallest unit. 
-
-Actions List:
-- MoveAhead [length] : This action means move towards your Front direction by [length] meters, default with {GRID_SIZE} meters
-- RotateRight [degrees] : This action means rotate to your right by a certain angle. e.g. rotate to Front Right, degrees=45, rotate to Right, degrees=90, rotate to Rear Left, degrees=215
-- Done
+Only choose parameter "name" from the following Actions List:
+- MoveAhead [length] : Move towards Front direction by [length] meters, length must be an integer multiple of {GRID_SIZE} meters.
+- RotateRight [degrees] : Rotate to right by a certain angle. e.g. degrees=90 : rotate to Right, degrees=215 : rotate to Rear Left
+- Done : Indicates completion of the task.
 """,
-        OpType.EIGHT_DIR_MOVE: f"""Take action to move around the room. Use Action Tool as this format:
+        OpType.EIGHT_DIR_MOVE: f"""
+Usage of Action Tool:
+Choose ONE of three commands:
 - Action: Move [direction] [length]
 - Action: RotateTo [direction]
 - Action: Done
 
-The "Move" action allows you to turn in a specified direction and then move forward a distance. It has two parameters: direction and length, where the [] just used to identify the parameter, you don't need to enter it when passing the parameter. If you only need to turn to a direction, use "RotateTo" action.
+Explanations:
+"Move" action : turn to [direction] and then move forward a distance of [length].  
+"RotateTo" action: only turn to [direction], no forward movement.
+"[]" just used to identify the parameter, you don't need to enter it when passing the parameter.
 
-You are very strict to next two rules: 
-(1) the length parameter MUST be an integer multiple of {GRID_SIZE} in meters. 
-(2) The direction parameter can only be choosen from this Direction Name List:
+You are very strict to next two instructions:
+(1) the "length" parameter MUST be an integer multiple of {GRID_SIZE} in meters. 
+(2) The "direction" parameter can only be choosen from:
 	[Front, Front Right, Right, Rear Right, Rear, Rear Left, Left, Front Left]
 """,
-        OpType.FOLLOW_OBJ: f"""You can use make a move to next viewpoint which is closest to an certain object. Use Action Tool as this format:
+        OpType.FOLLOW_OBJ: f"""
+Usage of Action Tool:
+Choose ONE of two commands:
 - Action: MoveTo [object_name]
-- Action: RotateTo [direction]
-- Action: Done
+- Action: Done ObjectAt [direction]
 
-The "MoveTo" action allows you to move to the closest position to a specific object. If you only need to turn to a direction, use "RotateTo" action.
+Explanations:
+"MoveTo" action : Move directly to the closest position to a specific object. 
+"Done" action : Use it when target is found.
 
-You are very strict to next rules: 
-(1) The "object_name" parameter must be valid name of an object. You only choose object that appears in this step's observation. Never use nonexist object name or direction name as "object_name".
-(2) The "direction" parameter can only be choosen from this Direction Name List:
+You are very strict to next instructions:
+(1) The "object_name" parameter must be valid name of an object. Only choose names that appears in this step's observation. Don't use direction name.
+(2) Never use target object name as "object_name" parameter. If target object is already in view, you must output a "Done" action. 
+(3) The "direction" parameter can only be choosen from:
 	[Front, Front Right, Right, Rear Right, Rear, Rear Left, Left, Front Left]
 """
     }
 
-    nav_tips_prompt = f"""
-At each step, you should consider: 
-(1) According to the RULES, have you found the target object? If yes, you should output "Action: Done" to stop. Or you should continue.
-(2) Consider where you are on the environment and where should be the next viewpoint to navigate in order to find the target object. Then use the Action tool, trying to move to that location. Show your reasoning in the Thought section. 
-"""
+#     nav_tips_prompt = f"""
+# At each step, you should consider:
+# (1) According to the RULES, have you found the target object? If yes, you should output "Action: Done" to stop. Or you should continue.
+# (2) Consider where you are on the environment and where should be the next viewpoint to navigate in order to find the target object. Then use the Action tool, trying to move to that location. Show your reasoning in the Thought section.
+# """
 
-    format_prompt = """Starting below, you should follow this format:
+    format_prompt = """Starting below, follow this format:
 ---
-Target: (the name of the target object, always keep it in mind)
-Initial Observation [1]: (initial observation of the environment)
-Thought [1]: (always think about what to do next and why)
-Action [1]: (the action to take, must be "Move" or "Done". If you take "Move" action, passing vaild parameters)
-Observation [2]: (next observation after you took an action)
+Target: (name of the target object)
+Initial Observation [1]: (...)
+Thought [1]: (The thought you generate)
+Action [1]: (The action you generate)
+Observation [2]: (next observation)
 ... 
 (this Observation/Thought/Action pattern can repeat N times)
 ...
 Thought [N]: I have found the target object, I can stop. 
 Action [N]: Done
+---
 """
 
-    return principal_prompt + action_tool_prompt[action_type] + nav_tips_prompt + format_prompt
-
-
-def get_observation_prompt():
-    observation_tips_prompt = f"""
-    TIPS: Each object in "Objects detail" section is in this format:" '(name)':'(approximate position, based on current view) (distance)' "
-    And the Maximum distance of accessibility sectionis the max distance you can travel in that direction without hitting an obstacle.
+    format_prompt_follow_obj = """Starting below, follow this format:
+---
+Target: (name of the target object)
+Initial Observation [1]: (...)
+Thought [1]: (The thought you generate)
+Action [1]: (The action you generate)
+Observation [2]: (next observation)
+... 
+(this Observation/Thought/Action pattern can repeat N times)
+...
+Thought [N]: I have found the target object, I can stop. 
+Action [N]: Done ObjectAt [direction]
+---
 """
-    return observation_tips_prompt
+
+    if action_type == OpType.FOLLOW_OBJ:
+        return principal_prompt_follow_obj + action_tool_prompt[action_type] + format_prompt_follow_obj
+    else:
+        return principal_prompt + action_tool_prompt[action_type] + format_prompt
+
+
+# def get_observation_prompt():
+#     observation_tips_prompt = f"""
+#     TIPS: Each object in "Objects detail" section is in this format:" '(name)':'(approximate position, based on current view) (distance)' "
+#     And the Maximum distance of accessibility sectionis the max distance you can travel in that direction without hitting an obstacle.
+# """
+#     return observation_tips_prompt
 
 
 def get_first_prompt(target_object_type, init_observation):
@@ -732,23 +780,17 @@ def extract_action_command(action_type, action_str):
             return None
 
     if action_type == OpType.FOLLOW_OBJ:
-        action_pattern = r"\s*(MoveTo|RotateTo)\s*(.*)\s*|^(Done)$"
+        action_pattern = r"\s*(MoveTo|Done ObjectAt)\s*(.*)\s*"
         action_match = re.match(action_pattern, action_str)
         if action_match:
-            if action_match.group(3):
-                res_dict = {
-                    'name': action_match.group(3),
-                    'param': "",
-                    'action_type': OpType.FOLLOW_OBJ
-                }
-            else:
-                action_name = action_match.group(1)
-                param1 = action_match.group(2)
-                res_dict = {
-                    'name': action_name,
-                    'param': param1,
-                    'action_type': OpType.FOLLOW_OBJ
-                }
+            action_name = "MoveTo" if action_match.group(
+                1) == "MoveTo" else "Done"
+            param1 = action_match.group(2)
+            res_dict = {
+                'name': action_name,
+                'param': param1,
+                'action_type': OpType.FOLLOW_OBJ
+            }
             return res_dict
         else:
             print("[Output Extract]The input string does not match the ACTION pattern.")
@@ -879,21 +921,22 @@ def do_action_by_message(controller, sim_args, action_type, msg_string: str):
             event = tele_to_object_nearby(controller, tele_obj_name)
             if not event:
                 return None
-        elif action_name == "RotateTo":
+        elif action_name == "Done":
             if param_name in DIRECTION_DICT.keys():
                 direction = DIRECTION_DICT[param_name]
+                print(
+                    "[Operation]event = controller.step(RotateRight, %f)" % direction)
+                # Turn to done action dierction
+                event = controller.step("RotateRight", degrees=direction)
+                event = controller.step("Done")
+
+                # To check if actually success the task.
+                get_json_objects_result(
+                    controller, sim_args, is_check_front_target=True)
+                task_success = True
             else:
                 print("[Operation]Error: receiving direction name is invaild.")
                 return None
-            if direction > 0:
-                print(
-                    "[Operation]event = controller.step(RotateRight, %f)" % direction)
-                event = controller.step("RotateRight", degrees=direction)
-            else:
-                event = controller.last_event  # 不执行动作，返回上一步的动作
-        elif action_name == "Done":
-            event = controller.step("Done")
-            task_success = True
         else:
             print("[Operation]Error: receiving action name is invaild.")
             return None
@@ -1050,7 +1093,7 @@ Action [1]: {last_action}"""
         res = ""
         for each in obs:
             res += each
-        res += get_observation_prompt()
+        # res += get_observation_prompt()
 
         # return: observation, summrize_oberservation
         return res, "\n".join(s_obs)
@@ -1061,7 +1104,7 @@ Action [1]: {last_action}"""
         obs_str = ""
         for each in obs:
             obs_str += each
-        obs_str += get_observation_prompt()
+        # obs_str += get_observation_prompt()
 
         if step == 1:
             new_history_str = self.get_first_history_prompt(thought, action)
@@ -1077,7 +1120,7 @@ Action [1]: {last_action}"""
         for each in history_list:
             next_input_str += each
 
-        next_input_str += f"""Observation [{step + 1}]: \n {obs_str}"""
+        next_input_str += f"""\nObservation [{step + 1}]: \n {obs_str}"""
         return next_input_str
 
     def init_epsoide(self, ep):
@@ -1209,14 +1252,21 @@ Action [1]: {last_action}"""
         sys_prompt = "You are an Embodied Agent, who interact with the environment and complete tasks for human."  # 初始化 system prompt
 
         try:
-            print(f"------------ \n< Task start. ep name:{ep['id']} >")
+            print(f"-------------------- \n< Task start. ep name:{ep['id']} >")
+            # 先写日志，防止抛出异常
+            self.chat_logs.append(
+                f"-------------------- \n< Task start. ep name:{ep['id']} >")
             while not task_success:
 
                 self.step_count += 1
 
                 if self.step_count > MAX_STEP:
                     print("Error: MAX step tries reached.")
+                    self.chat_logs.append("<Error: MAX step tries reached.>")
                     break
+                else:
+                    self.chat_logs.append(
+                        f"-------------------- \n <STEP: {self.step_count}>\n ")
 
                 if self.step_count == 1:
                     gpt_prompt = get_full_prompt(self.ACTION_TYPE,
@@ -1240,14 +1290,12 @@ Action [1]: {last_action}"""
 
                 if not success:
                     print("Error: call chatbot failed.")
+                    self.chat_logs.append("<Error: call chatbot failed.>")
                     break
                 reply = self.chatbot.get_last_chat_content()
                 print(
                     f"< STEP:{self.step_count} \n --reply: \n {reply} \n --reply end>")
 
-                # 先写日志，防止抛出异常
-                self.chat_logs.append(
-                    f"< STEP:{self.step_count} \n --reply: \n ")
                 self.chat_logs.extend(self.chatbot.get_messages_list())
 
                 do_action_return = do_action_by_message(
@@ -1257,7 +1305,9 @@ Action [1]: {last_action}"""
                     msg_string=reply)
 
                 if do_action_return is None:
-                    print("Error: do action failed.")
+                    self.chat_logs.append(
+                        "<Do Action Result: do_action_return None. --> Failed.>")
+                    print("Do Action Result: do_action_return None. --> Failed.")
                     break
                 else:
                     event, thought, action, task_success = do_action_return
@@ -1267,6 +1317,8 @@ Action [1]: {last_action}"""
                         action=action,
                         history_list=self.history_result_prompts
                     )
+                    self.chat_logs.append(
+                        f"<Do Action Result: action: {action} >")
                     # 写入路径记录
                     self.paths.append({
                         "point": event.metadata['agent']['position'],
@@ -1274,23 +1326,25 @@ Action [1]: {last_action}"""
                     })
 
                     if not event.metadata['lastActionSuccess']:
-                        print("Error: Agent did invaild move! Detail: %s" %
-                              event.metadata["errorMessage"])
+                        print(
+                            f"Do Action Error: Agent did invaild move! Detail: {event.metadata['errorMessage']} --> Failed.")
+                        self.chat_logs.append(
+                            f"Do Action Error: Agent did invaild move! Detail: {event.metadata['errorMessage']} --> Failed.")
                         break
-                # print(
-                #     f"<STEP:{self.step_count}history_result_prompts len: {len(self.history_result_prompts)}")
+
             self.write_records()
 
-            if task_success or self.SIM_ARGS.rules_achieve:
-                print("<Task End. Result: Success Done!>")
-            else:
-                print("<Task End. Result: Finished. But end up failed.>")
-
+            print(
+                f"<Task End.> Result: \n\tLLM success={task_success} \n\tRule success={self.SIM_ARGS.rules_achieve}")
+            self.chat_logs.append(
+                f"<Task End.> Result: \n\tLLM success={task_success} \n\tRule success={self.SIM_ARGS.rules_achieve}")
             print(
                 f"<Task Call GPT Avg. time= {total_call_gpt_cost_time / self.step_count}>")
             return (task_success and 1 or 0, self.SIM_ARGS.rules_achieve and 1 or 0, True)
 
         except Exception as e:
-            print(f"<Task exceeded by exception! Detail: {e}>")
+            print(f"//////Task exceeded by exception! Detail: {e}//////")
+            self.chat_logs.append(
+                f"////// Task exceeded by exception! Detail: {e}//////")
             self.write_records()
             return (0, 0, False)
