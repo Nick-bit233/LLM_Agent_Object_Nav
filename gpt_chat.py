@@ -67,26 +67,36 @@ class gpt:
             "Authorization": f"Bearer {self.API_KEYS[self.platform_name]}"
         }
         # 发送请求
-        if self.enable_proxy:
-            response = requests.post(
-                self.URLS[self.platform_name] + self.CHAT_SUFFIX, headers=headers, json=parameters, proxies=self.proxies)
-        else:
-            response = requests.post(
-                self.URLS[self.platform_name] + self.CHAT_SUFFIX, headers=headers, json=parameters)
+        max_timeout = 120
+        # add retries
+        max_retries = 3
+        for i in range(max_retries):
+            try:
+                if self.enable_proxy:
+                    response = requests.post(
+                        self.URLS[self.platform_name] + self.CHAT_SUFFIX, headers=headers, json=parameters, proxies=self.proxies, timeout=max_timeout)
+                else:
+                    response = requests.post(
+                        self.URLS[self.platform_name] + self.CHAT_SUFFIX, headers=headers, json=parameters, timeout=max_timeout)
+                # 解析响应
+                if response.status_code == 200:
+                    data = response.json()
+                    usage = data["usage"]["total_tokens"]
+                    msg = data["choices"][0]["message"]
+                    self.total_usage = usage
 
-        # 解析响应
-        if response.status_code == 200:
-            data = response.json()
-            # print(data)
-            usage = data["usage"]["total_tokens"]
-            msg = data["choices"][0]["message"]
-            self.total_usage = usage
+                    return msg
+                else:
+                    print("No vaild response! Response code: %d, error msg: %s" %
+                          (response.status_code, response.text))
+                    return None
 
-            return msg
-        else:
-            print("response code: %d, error msg: %s" %
-                  (response.status_code, response.text))
-            return None
+            except requests.Timeout:
+                print(f"Request timed out! Retry {i+1}/{max_retries}")
+            except requests.RequestException as e:
+                print(f"Request error: {e} Retry {i+1}/{max_retries}")
+
+        return None
 
     def start_new_conversation(self, system_input, user_input):
         new_messages = [{"role": "system", "content": system_input}]

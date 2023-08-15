@@ -355,8 +355,6 @@ def get_max_access_distance(controller, sim_args, deg_unit):
     current_point = float_point_regularization(current_point)
     valid_points, invalid_points = get_reach_valid_points(
         GRID_SIZE, valid_points)
-    # print(f"degree: {w_degrees}, valid_points:")
-    # print(valid_points)
 
     dx, dz = dir_dict[w_degrees]
 
@@ -885,7 +883,7 @@ def do_action_by_message(agent, msg_string: str):
                 event = controller.step(action_name, degrees=param_value)
 
             log_action_trajectorys(
-                agent, action_name + " " + param_value, event)
+                agent, f"{action_name} {param_value}", event)
 
     elif result_type == OpType.EIGHT_DIR_MOVE:
         action_name = result['name']
@@ -1042,6 +1040,30 @@ class Agent:
     record_file_path = "./test_path_record.json"
 
     ### debug section ###
+    def check_session_alive(self):
+        alive = False
+        if self.controller:
+            event = self.controller.last_event
+        else:
+            return False
+
+        for i in range(int(360/self.DEG_UNIT)):
+            depth_frame = event.depth_frame
+            avg_depth = np.mean(depth_frame)
+            count_zero_depth = np.sum(depth_frame == 0)
+
+            idetections = event.instance_detections2D
+            print(
+                f"<Session Alive Check: depth_frame avg: {avg_depth}, black count: {count_zero_depth}>")
+
+            if len(idetections) > 0:
+                alive = True
+                break
+            else:
+                event = self.controller.step(
+                    "RotateRight", degrees=self.DEG_UNIT)
+        return alive
+
     def draw_position_points(self):
         if self.controller:
             draw_current_valid_points(
@@ -1322,9 +1344,10 @@ Action [1]: {last_action}"""
                 # ---Test time end---
 
                 if not success:
-                    print("Error: call chatbot failed.")
-                    self.chat_logs.append("<Error: call chatbot failed.>")
-                    break
+                    self.chat_logs.append(
+                        "<Error: Call Chatbot API request failed.>")
+                    raise Exception("Call Chatbot API request failed.")
+
                 reply = self.chatbot.get_last_chat_content()
                 print(
                     f"< STEP:{self.step_count} \n --reply: \n {reply} \n --reply end>")
